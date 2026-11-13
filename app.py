@@ -1,10 +1,7 @@
-import os
 import streamlit as st
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
-import shap
-import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Emergency Clinical Triage CDSS", page_icon="🏥", layout="wide")
 
@@ -40,14 +37,14 @@ def train_triage_model():
     y = df["target_acuity"].astype(int)
 
     model = lgb.LGBMClassifier(
-        n_estimators=300, max_depth=6, num_leaves=31, learning_rate=0.03,
-        class_weight="balanced", subsample=0.8, colsample_bytree=0.8, random_state=42, verbose=-1
+        n_estimators=200, max_depth=6, num_leaves=31, learning_rate=0.03,
+        class_weight="balanced", subsample=0.8, colsample_bytree=0.8,
+        n_jobs=1, random_state=42, verbose=-1
     )
     model.fit(X, y)
-    explainer = shap.TreeExplainer(model)
-    return model, feature_cols, explainer
+    return model, feature_cols
 
-model, feature_cols, explainer = train_triage_model()
+model, feature_cols = train_triage_model()
 
 st.title("🏥 AI-Assisted Emergency Clinical Triage & Safe Dispensary System")
 st.markdown("**Hybrid Architecture:** Balanced LightGBM + Clinical Physiological Biomarkers + Deterministic Safety Interlocks")
@@ -91,7 +88,8 @@ if st.sidebar.button("Run Clinical Triage Assessment", type="primary"):
 
     st.divider()
 
-    if (pred_tier == 0 and probs[0] >= 0.80) or is_extreme:
+    is_critical = (pred_tier == 0 and probs[0] >= 0.80) or is_extreme
+    if is_critical:
         st.error(f"🚨 **TRIAGE RESULT FOR {patient_name.upper()}: CRITICAL (Level 0 — KTAS 1–2)**")
         st.warning("🔒 **SAFETY INTERLOCK ACTIVATED:** Automated medicine dispensary LOCKED. Rapid Response Emergency Unit dispatched immediately.")
     else:
@@ -111,17 +109,20 @@ if st.sidebar.button("Run Clinical Triage Assessment", type="primary"):
         prob_df = pd.DataFrame({
             "Acuity Tier": ["Critical (0)", "Urgent (1)", "Non-Urgent (2)"],
             "Probability": probs
-        })
-        st.bar_chart(prob_df.set_index("Acuity Tier"))
+        }).set_index("Acuity Tier")
+        st.bar_chart(prob_df)
 
     with right:
         st.subheader("Patient-Level TreeSHAP Feature Attribution")
-        sv = explainer.shap_values(input_df)
-        target_idx = 0 if ((pred_tier == 0 and probs[0] >= 0.80) or is_extreme) else pred_tier
-        vals = sv[target_idx][0] if isinstance(sv, list) else (sv[0, :, target_idx] if sv.ndim == 3 else sv[0])
-        shap_series = pd.Series(vals, index=feature_cols).sort_values()
-        fig, ax = plt.subplots(figsize=(6, 4))
-        shap_series.plot(kind="barh", color=["#dc2626" if v > 0 else "#2563eb" for v in shap_series], ax=ax)
-        ax.set_xlabel("SHAP Impact on Predicted Class")
-        plt.tight_layout()
-        st.pyplot(fig)
+        # Native LightGBM TreeSHAP values (no external shap package needed)
+        contribs = model.predict(input_df, pred_contrib=True)[0]
+        n_feat = len(feature_cols)
+        target_idx = 0 if is_critical else pred_tier
+        # Each class has (n_feat + 1) values; last value is bias
+        start = target_idx * (n_feat + 1)
+        shap_vals = contribs[start : start + n_feat]
+        shap_df = pd.DataFrame({
+            "Feature": feature_cols,
+            "SHAP Impact": shap_vals
+        }).set_index("Feature").sort_values(by="SHAP Impact", ascending=False)
+        st.bar_chart(shap_df)
